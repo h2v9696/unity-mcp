@@ -35,6 +35,8 @@ namespace MCPForUnity.Editor.Tools
             "createso",
             "modify",
             "modifyso",
+            "read",
+            "readso",
         };
 
         public static object HandleCommand(JObject @params)
@@ -53,6 +55,7 @@ namespace MCPForUnity.Editor.Tools
             // Allow JSON-string parameters for objects/arrays.
             JsonUtil.CoerceJsonStringParameter(@params, "target");
             CoerceJsonStringArrayParameter(@params, "patches");
+            CoerceJsonStringArrayParameter(@params, "property_filter");
 
             string actionRaw = @params["action"]?.ToString();
             if (string.IsNullOrWhiteSpace(actionRaw))
@@ -69,6 +72,11 @@ namespace MCPForUnity.Editor.Tools
             if (IsCreateAction(action))
             {
                 return HandleCreate(@params);
+            }
+
+            if (IsReadAction(action))
+            {
+                return HandleRead(@params);
             }
 
             return HandleModify(@params);
@@ -1488,6 +1496,306 @@ namespace MCPForUnity.Editor.Tools
         private static bool IsCreateAction(string normalized)
         {
             return normalized == "create" || normalized == "createso";
+        }
+
+        private static bool IsReadAction(string normalized)
+        {
+            return normalized == "read" || normalized == "readso";
+        }
+
+        private static object HandleRead(JObject @params)
+        {
+            if (!TryResolveTarget(@params["target"], out var target, out var targetPath, out var targetGuid, out var err))
+            {
+                return err;
+            }
+
+            // Build optional filter set (null = return all)
+            HashSet<string> filterSet = null;
+            var filterToken = @params["property_filter"];
+            if (filterToken is JArray filterArr && filterArr.Count > 0)
+            {
+                filterSet = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var item in filterArr)
+                {
+                    string raw = item?.ToString();
+                    if (!string.IsNullOrWhiteSpace(raw))
+                    {
+                        filterSet.Add(NormalizePropertyPath(raw));
+                    }
+                }
+            }
+
+            int maxArrayElements = @params["max_array_elements"]?.ToObject<int?>() ?? 32;
+
+            var properties = ReadTopLevelProperties(target, filterSet, maxArrayElements);
+
+            return new SuccessResponse(
+                "ScriptableObject properties read.",
+                new
+                {
+                    targetGuid,
+                    targetPath,
+                    targetTypeName = target.GetType().FullName,
+                    properties
+                }
+            );
+        }
+
+        private static List<object> ReadTopLevelProperties(UnityEngine.Object target, HashSet<string> filterSet, int maxArrayElements)
+        {
+            var results = new List<object>();
+            var so = new SerializedObject(target);
+            so.Update();
+
+            var prop = so.GetIterator();
+            bool enterChildren = true;
+            while (prop.NextVisible(enterChildren))
+            {
+                enterChildren = false;
+
+                // Skip the built-in "m_Script" reference — not useful for callers
+                if (prop.propertyPath == "m_Script")
+                {
+                    continue;
+                }
+
+                if (filterSet != null && !filterSet.Contains(NormalizePropertyPath(prop.propertyPath)))
+                {
+                    continue;
+                }
+
+                results.Add(BuildPropertyEntry(prop.Copy(), maxArrayElements, 0));
+            }
+
+            return results;
+        }
+
+        private static object BuildPropertyEntry(SerializedProperty prop, int maxArrayElements, int depth)
+        {
+            return new
+            {
+                propertyPath = prop.propertyPath,
+                displayName = prop.displayName,
+                propertyType = prop.propertyType.ToString(),
+                isArray = prop.isArray && prop.propertyType != SerializedPropertyType.String,
+                value = ReadPropertyValue(prop, maxArrayElements, depth)
+            };
+        }
+
+        private static object ReadPropertyValue(SerializedProperty prop, int maxArrayElements, int depth)
+        {
+            const int MAX_DEPTH = 8;
+            if (depth > MAX_DEPTH)
+            {
+                return "<max_depth_exceeded>";
+            }
+
+            // Arrays (except String which is also isArray)
+            if (prop.isArray && prop.propertyType != SerializedPropertyType.String)
+            {
+                return ReadArrayValue(prop, maxArrayElements, depth);
+            }
+
+            try
+            {
+                switch (prop.propertyType)
+                {
+                    case SerializedPropertyType.Integer:
+                        return prop.type == "long" ? (object)prop.longValue : prop.intValue;
+
+                    case SerializedPropertyType.Boolean:
+                        return prop.boolValue;
+
+                    case SerializedPropertyType.Float:
+                        return prop.type == "double" ? (object)prop.doubleValue : prop.floatValue;
+
+                    case SerializedPropertyType.String:
+                        return prop.stringValue;
+
+                    case SerializedPropertyType.Color:
+                        var c = prop.colorValue;
+                        return new { r = c.r, g = c.g, b = c.b, a = c.a };
+
+                    case SerializedPropertyType.ObjectReference:
+                        return ResolveObjectRef(prop);
+
+                    case SerializedPropertyType.LayerMask:
+                        return prop.intValue;
+
+                    case SerializedPropertyType.Enum:
+                        return new
+                        {
+                            value = prop.enumValueIndex,
+                            name = prop.enumValueIndex >= 0 && prop.enumValueIndex < prop.enumNames.Length
+                                ? prop.enumNames[prop.enumValueIndex]
+                                : null,
+                            names = prop.enumNames
+                        };
+
+                    case SerializedPropertyType.Vector2:
+                        var v2 = prop.vector2Value;
+                        return new { x = v2.x, y = v2.y };
+
+                    case SerializedPropertyType.Vector3:
+                        var v3 = prop.vector3Value;
+                        return new { x = v3.x, y = v3.y, z = v3.z };
+
+                    case SerializedPropertyType.Vector4:
+                        var v4 = prop.vector4Value;
+                        return new { x = v4.x, y = v4.y, z = v4.z, w = v4.w };
+
+                    case SerializedPropertyType.Rect:
+                        var r = prop.rectValue;
+                        return new { x = r.x, y = r.y, width = r.width, height = r.height };
+
+                    case SerializedPropertyType.ArraySize:
+                        return prop.intValue;
+
+                    case SerializedPropertyType.Character:
+                        return (char)prop.intValue;
+
+                    case SerializedPropertyType.AnimationCurve:
+                        return ReadAnimationCurve(prop.animationCurveValue);
+
+                    case SerializedPropertyType.Bounds:
+                        var b = prop.boundsValue;
+                        return new
+                        {
+                            center = new { x = b.center.x, y = b.center.y, z = b.center.z },
+                            extents = new { x = b.extents.x, y = b.extents.y, z = b.extents.z }
+                        };
+
+                    case SerializedPropertyType.Quaternion:
+                        var q = prop.quaternionValue;
+                        return new { x = q.x, y = q.y, z = q.z, w = q.w };
+
+                    case SerializedPropertyType.ExposedReference:
+                        return ResolveObjectRef(prop);
+
+                    case SerializedPropertyType.FixedBufferSize:
+                        return prop.fixedBufferSize;
+
+                    case SerializedPropertyType.Vector2Int:
+                        var v2i = prop.vector2IntValue;
+                        return new { x = v2i.x, y = v2i.y };
+
+                    case SerializedPropertyType.Vector3Int:
+                        var v3i = prop.vector3IntValue;
+                        return new { x = v3i.x, y = v3i.y, z = v3i.z };
+
+                    case SerializedPropertyType.RectInt:
+                        var ri = prop.rectIntValue;
+                        return new { x = ri.x, y = ri.y, width = ri.width, height = ri.height };
+
+                    case SerializedPropertyType.BoundsInt:
+                        var bi = prop.boundsIntValue;
+                        return new
+                        {
+                            center = new { x = bi.center.x, y = bi.center.y, z = bi.center.z },
+                            size = new { x = bi.size.x, y = bi.size.y, z = bi.size.z }
+                        };
+
+                    case SerializedPropertyType.Generic:
+                    case SerializedPropertyType.ManagedReference:
+                        return ReadGenericValue(prop.Copy(), maxArrayElements, depth);
+
+                    default:
+                        return $"<unsupported:{prop.propertyType}>";
+                }
+            }
+            catch (Exception ex)
+            {
+                return $"<error:{ex.Message}>";
+            }
+        }
+
+        private static object ReadArrayValue(SerializedProperty prop, int maxArrayElements, int depth)
+        {
+            const int HARD_CAP = 256;
+            int count = prop.arraySize;
+            int readCount = Math.Min(count, Math.Min(maxArrayElements, HARD_CAP));
+            bool truncated = count > readCount;
+
+            var elements = new List<object>(readCount);
+            for (int i = 0; i < readCount; i++)
+            {
+                var element = prop.GetArrayElementAtIndex(i);
+                elements.Add(ReadPropertyValue(element, maxArrayElements, depth + 1));
+            }
+
+            return new
+            {
+                count,
+                truncated,
+                elements
+            };
+        }
+
+        private static object ReadGenericValue(SerializedProperty prop, int maxArrayElements, int depth)
+        {
+            var children = new List<object>();
+            var endProp = prop.GetEndProperty();
+            bool enterChildren = true;
+            while (prop.NextVisible(enterChildren))
+            {
+                enterChildren = false;
+                if (SerializedProperty.EqualContents(prop, endProp))
+                {
+                    break;
+                }
+
+                children.Add(BuildPropertyEntry(prop.Copy(), maxArrayElements, depth + 1));
+            }
+
+            return children;
+        }
+
+        private static object ResolveObjectRef(SerializedProperty prop)
+        {
+            var objRef = prop.objectReferenceValue;
+            if (objRef == null)
+            {
+                return null;
+            }
+
+            string assetPath = AssetDatabase.GetAssetPath(objRef);
+            string guid = !string.IsNullOrEmpty(assetPath)
+                ? AssetDatabase.AssetPathToGUID(assetPath)
+                : null;
+
+            return new
+            {
+                guid,
+                path = assetPath,
+                name = objRef.name,
+                type = objRef.GetType().FullName
+            };
+        }
+
+        private static object ReadAnimationCurve(AnimationCurve curve)
+        {
+            if (curve == null)
+            {
+                return null;
+            }
+
+            var keys = new List<object>(curve.keys.Length);
+            foreach (var key in curve.keys)
+            {
+                keys.Add(new
+                {
+                    time = key.time,
+                    value = key.value,
+                    inTangent = key.inTangent,
+                    outTangent = key.outTangent,
+                    weightedMode = (int)key.weightedMode,
+                    inWeight = key.inWeight,
+                    outWeight = key.outWeight
+                });
+            }
+
+            return new { keys };
         }
 
         /// <summary>

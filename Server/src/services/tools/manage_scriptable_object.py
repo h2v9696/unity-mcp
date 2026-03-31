@@ -6,6 +6,7 @@ Command name: "manage_scriptable_object"
 Actions:
   - create: create an SO asset (optionally with patches)
   - modify: apply serialized property patches to an existing SO asset
+  - read: read field values from an existing SO asset via SerializedObject API
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from transport.legacy.unity_connection import async_send_command_with_retry
 
 @mcp_for_unity_tool(
     group="scripting_ext",
-    description="Creates and modifies ScriptableObject assets using Unity SerializedObject property paths.",
+    description="Creates, modifies, and reads ScriptableObject assets using Unity SerializedObject property paths.",
     annotations=ToolAnnotations(
         title="Manage Scriptable Object",
         destructiveHint=True,
@@ -32,7 +33,7 @@ from transport.legacy.unity_connection import async_send_command_with_retry
 )
 async def manage_scriptable_object(
     ctx: Context,
-    action: Annotated[Literal["create", "modify"], "Action to perform: create or modify."],
+    action: Annotated[Literal["create", "modify", "read"], "Action to perform: create, modify, or read."],
     # --- create params ---
     type_name: Annotated[str | None,
                          "Namespace-qualified ScriptableObject type name (for create)."] = None,
@@ -42,10 +43,10 @@ async def manage_scriptable_object(
                           "Asset file name without extension (for create)."] = None,
     overwrite: Annotated[bool | str | None,
                          "If true, overwrite existing asset at same path (for create)."] = None,
-    # --- modify params ---
+    # --- modify / read params ---
     target: Annotated[dict[str, Any] | str | None,
-                      "Target asset reference {guid|path} (for modify)."] = None,
-    # --- shared ---
+                      "Target asset reference {guid|path} (for modify/read)."] = None,
+    # --- shared (create/modify) ---
     patches: Annotated[list[dict[str, Any]] | str | None,
                        "Patch list (or JSON string) to apply. "
                        "For object references: use {\"ref\": {\"guid\": \"...\"}} or {\"value\": {\"guid\": \"...\"}}. "
@@ -54,6 +55,11 @@ async def manage_scriptable_object(
     # --- validation ---
     dry_run: Annotated[bool | str | None,
                        "If true, validate patches without applying (modify only)."] = None,
+    # --- read params ---
+    property_filter: Annotated[list[str] | str | None,
+                               "List of property paths to read (read only). Null = all properties."] = None,
+    max_array_elements: Annotated[int | None,
+                                  "Max array elements to return per array (read only, default 32, max 256)."] = None,
 ) -> dict[str, Any]:
     unity_instance = await get_unity_instance_from_context(ctx)
 
@@ -67,6 +73,9 @@ async def manage_scriptable_object(
     if parsed_patches is not None and not isinstance(parsed_patches, list):
         return {"success": False, "message": "manage_scriptable_object: 'patches' must be a list (or JSON string of a list)."}
 
+    # Parse property_filter if passed as JSON string
+    parsed_property_filter = parse_json_payload(property_filter)
+
     params: dict[str, Any] = {
         "action": action,
         "typeName": type_name,
@@ -76,6 +85,8 @@ async def manage_scriptable_object(
         "target": parsed_target,
         "patches": parsed_patches,
         "dryRun": coerce_bool(dry_run, default=None),
+        "property_filter": parsed_property_filter,
+        "max_array_elements": max_array_elements,
     }
 
     # Remove None values to keep Unity handler simpler
