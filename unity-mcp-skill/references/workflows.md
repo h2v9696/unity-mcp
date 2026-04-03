@@ -2058,6 +2058,51 @@ batch_execute(commands=commands, fail_fast=False)
 
 ---
 
+## UnityEvent Wiring (Button onClick, etc.)
+
+### Setting UnityEvent via manage_components
+
+UnityEvent fields (`m_OnClick`, custom events) require **Component instanceID** for `m_Target`, not GameObject instanceID.
+
+```python
+# Step 1: Find the target Component (NOT GameObject)
+find_gameobjects(search_term="HomePanelManager", search_method="by_component")
+# Returns GameObject instanceID 152504 — but we need the Component
+
+# Step 2: Get the Component instanceID
+# Read the component resource to find the actual component instanceID
+# mcpforunity://scene/gameobject/152504/components → find HomePanelManager component ID
+
+# Step 3: Set m_OnClick with Component instanceID
+manage_components(
+    action="set_property",
+    target=152344,  # Button's GameObject
+    component_type="Button",
+    property="m_OnClick",
+    value={
+        "m_PersistentCalls": {
+            "m_Calls": [{
+                "m_Target": {"instanceID": 98765},  # Component instanceID, NOT GameObject
+                "m_TargetAssemblyTypeName": "HomePanelManager, Assembly-CSharp",
+                "m_MethodName": "OnClickAgreeButton",
+                "m_Mode": 1,      # 1 = void method
+                "m_CallState": 2   # 2 = Runtime
+            }]
+        }
+    }
+)
+```
+
+**Common mistakes:**
+- Using GameObject instanceID for `m_Target` → silently fails, event not persisted
+- Omitting `m_TargetAssemblyTypeName` → Unity can't resolve method at runtime
+- Including `m_ObjectArgument` with `{"instanceID": 0}` → causes error, omit instead
+- Read-back shows `{}` for events? Read-back now includes full event data via SerializedObject API
+
+### Reading UnityEvent data
+
+UnityEvent read-back is serialized via `SerializedObject` API (not reflection), so `m_PersistentCalls` data is properly included in component resources.
+
 ## Error Recovery Patterns
 
 ### Stale File Recovery

@@ -7,6 +7,7 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Events;
 
 namespace MCPForUnity.Editor.Helpers
 {
@@ -535,6 +536,10 @@ namespace MCPForUnity.Editor.Helpers
             }
             // --- End Use cached metadata ---
 
+            // --- UnityEvent fields: re-serialize via SerializedObject (reflection returns {}) ---
+            OverwriteUnityEventFields(c, serializablePropertiesOutput);
+            // --- End UnityEvent fields ---
+
             if (serializablePropertiesOutput.Count > 0)
             {
                 data["properties"] = serializablePropertiesOutput;
@@ -624,6 +629,100 @@ namespace MCPForUnity.Editor.Helpers
                         return jValue.Value;
                     }
                     // McpLog.Warn($"Unsupported JTokenType encountered: {token.Type}. Returning null.");
+                    return null;
+            }
+        }
+
+        /// <summary>
+        /// Re-serializes UnityEvent fields via SerializedObject API, replacing the empty {}
+        /// produced by reflection (which can't access UnityEvent internal m_PersistentCalls).
+        /// </summary>
+        private static void OverwriteUnityEventFields(Component c, Dictionary<string, object> output)
+        {
+            try
+            {
+                using var so = new SerializedObject(c);
+                so.Update();
+                var prop = so.GetIterator();
+                bool enterChildren = true;
+                while (prop.NextVisible(enterChildren))
+                {
+                    enterChildren = false;
+                    // Skip m_Script and other non-Generic properties
+                    if (prop.propertyType != SerializedPropertyType.Generic || prop.isArray)
+                        continue;
+
+                    // Check if the underlying field type derives from UnityEventBase
+                    var fieldInfo = c.GetType().GetField(prop.name,
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (fieldInfo == null || !typeof(UnityEventBase).IsAssignableFrom(fieldInfo.FieldType))
+                        continue;
+
+                    // Serialize via SerializedProperty
+                    var eventData = SerializeUnityEventProperty(prop.Copy());
+                    if (eventData != null)
+                        output[prop.name] = eventData;
+                }
+            }
+            catch (Exception e)
+            {
+                McpLog.Warn($"[OverwriteUnityEventFields] Error: {e.Message}");
+            }
+        }
+
+        private static object SerializeUnityEventProperty(SerializedProperty prop)
+        {
+            if (prop.isArray && prop.propertyType != SerializedPropertyType.String)
+            {
+                var list = new List<object>(prop.arraySize);
+                for (int i = 0; i < prop.arraySize; i++)
+                    list.Add(SerializeUnityEventProperty(prop.GetArrayElementAtIndex(i)));
+                return list;
+            }
+
+            if (prop.propertyType == SerializedPropertyType.Generic && !prop.isArray)
+            {
+                var dict = new Dictionary<string, object>();
+                var end = prop.GetEndProperty();
+                var child = prop.Copy();
+                if (child.Next(true))
+                {
+                    while (!SerializedProperty.EqualContents(child, end))
+                    {
+                        if (child.depth == prop.depth + 1)
+                            dict[child.name] = SerializeUnityEventProperty(child.Copy());
+                        if (!child.Next(false))
+                            break;
+                    }
+                }
+                return dict;
+            }
+
+            switch (prop.propertyType)
+            {
+                case SerializedPropertyType.Integer:
+                    return prop.type == "long" ? (object)prop.longValue : prop.intValue;
+                case SerializedPropertyType.Boolean:
+                    return prop.boolValue;
+                case SerializedPropertyType.Float:
+                    return prop.type == "double" ? (object)prop.doubleValue : prop.floatValue;
+                case SerializedPropertyType.String:
+                    return prop.stringValue;
+                case SerializedPropertyType.Enum:
+                    return prop.enumValueIndex >= 0 && prop.enumValueIndex < prop.enumNames.Length
+                        ? prop.enumNames[prop.enumValueIndex] : prop.enumValueIndex;
+                case SerializedPropertyType.ObjectReference:
+                    var obj = prop.objectReferenceValue;
+                    if (obj == null) return null;
+                    string path = AssetDatabase.GetAssetPath(obj);
+                    return new Dictionary<string, object>
+                    {
+                        { "instanceID", obj.GetInstanceID() },
+                        { "name", obj.name },
+                        { "type", obj.GetType().Name },
+                        { "path", string.IsNullOrEmpty(path) ? null : path }
+                    };
+                default:
                     return null;
             }
         }

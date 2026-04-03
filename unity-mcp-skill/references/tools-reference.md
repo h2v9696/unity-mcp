@@ -497,6 +497,61 @@ manage_asset(action="create_folder", path="Assets/NewFolder")
 manage_asset(action="delete", path="Assets/OldAsset.asset")
 ```
 
+### manage_scriptable_object
+
+Create, modify, and read ScriptableObject assets via SerializedObject property paths.
+
+```python
+# Create a new SO asset
+manage_scriptable_object(
+    action="create",
+    type_name="MyGame.Data.GameConfigSO",
+    folder_path="Assets/ScriptableObjects",
+    asset_name="NewConfig",
+    patches=[
+        {"path": "<MinEntityCount>k__BackingField", "value": 10},
+        {"path": "<SpeedFactor>k__BackingField", "value": 1.5}
+    ]
+)
+
+# Modify existing SO (by path or guid)
+manage_scriptable_object(
+    action="modify",
+    target={"path": "Assets/ScriptableObjects/MyConfig.asset"},
+    patches=[
+        {"path": "<MinEntityCount>k__BackingField", "value": 20},
+        {"path": "_sections.Array.data[0].ConfigOverride", "value": {"ref": {"guid": "abc123..."}}}
+    ]
+)
+
+# Validate patches without applying (dry run)
+manage_scriptable_object(
+    action="modify",
+    target={"guid": "abc123..."},
+    patches=[{"path": "<SomeField>k__BackingField", "value": 42}],
+    dry_run=True
+)
+
+# Read all field values from an SO
+manage_scriptable_object(
+    action="read",
+    target={"path": "Assets/ScriptableObjects/MyConfig.asset"}
+)
+
+# Read specific fields only
+manage_scriptable_object(
+    action="read",
+    target={"path": "Assets/ScriptableObjects/MyConfig.asset"},
+    property_filter=["<MinEntityCount>k__BackingField", "_sections"]
+)
+```
+
+**Key notes:**
+- Object references in patches: use `{"ref": {"guid": "..."}}` or `{"value": {"guid": "..."}}`
+- For Sprite sub-assets: include `"spriteName"` in the ref object
+- `read` action resolves ObjectReferences to `{guid, path, name, type}` — no need to parse raw YAML
+- Property paths use Unity's `SerializedProperty` format (e.g. `_sections.Array.data[0].MinTargets`)
+
 ### manage_prefabs
 
 Headless prefab operations.
